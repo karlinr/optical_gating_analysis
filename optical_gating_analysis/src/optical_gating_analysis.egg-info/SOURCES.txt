@@ -1,0 +1,7 @@
+setup.cfg
+setup.py
+src/optical_gating_analysis.egg-info/PKG-INFO
+src/optical_gating_analysis.egg-info/SOURCES.txt
+src/optical_gating_analysis.egg-info/dependency_links.txt
+src/optical_gating_analysis.egg-info/not-zip-safe
+src/optical_gating_analysis.egg-info/top_level.txt
