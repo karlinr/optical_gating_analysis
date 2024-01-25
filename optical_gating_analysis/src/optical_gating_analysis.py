@@ -44,6 +44,7 @@ class BasicOpticalGating():
         self.predictor = Predictor()
 
         self.drift = (0, 0)
+        self.drifts = [self.drift]
 
         self.settings = {
             "drift_correction": True,
@@ -51,13 +52,20 @@ class BasicOpticalGating():
         }
 
     def get_sads(self):
+        print("Getting SADs")
+
         self.sads = []
+
+        self.frame_means = []
+        self.ref_means = []
 
         while True:
             frame = self.sequence_manager.get_next_frame()
             if frame is None:
                 break
-            self.sads.append(self.get_sad(frame, self.sequence_manager.reference_sequence))
+            sad, frame_mean = self.get_sad(frame, self.sequence_manager.reference_sequence)
+            self.sads.append(sad)
+            self.frame_means.append(frame_mean)
 
     def get_sad(self, frame, reference_sequence):
         """ Get the sum of absolute differences for a single frame and our reference sequence.
@@ -110,11 +118,16 @@ class BasicOpticalGating():
         if self.settings["drift_correction"]:
             dx, dy = self.drift
             self.drift = update_drift_estimate(frame, reference_sequence[np.argmin(SAD)], (dx, dy))
+            self.drifts.append(self.drift)
 
-        return SAD
+        frame_mean = np.sum(frame_cropped) / np.product(frame_cropped.shape)
+
+        return SAD, frame_mean
     
     def get_phases(self):
-        """ Get the phase estimates for our sequence"""        
+        """ Get the phase estimates for our sequence""" 
+        print("Getting phases")
+
         self.phases = []
         self.frame_minimas = []
         
@@ -144,21 +157,37 @@ class BasicOpticalGating():
         self.sequence_manager.reset()
         if self.sequence_manager.reference_sequence is None:
             self.sequence_manager.get_reference_sequence()
+        drift_correct = 32
+        self.drift = get_drift_estimate(self.sequence_manager.get_next_frame(), self.sequence_manager.reference_sequence, dxRange=range(-drift_correct,drift_correct+1,3), dyRange=range(-drift_correct,drift_correct+1,3))
         self.get_sads()
         self.get_phases()
+
+    # Run with some default data
+    @classmethod
+    def default(cls):
+        BOG = cls()
+        BOG.sequence_manager.set_source(r"D:\Data\2012-06-20 13.34.11 vid 2x2 multi phase single plane\brightfield\*tif")
+        BOG.sequence_manager.set_reference_sequence(r"D:\Data\2012-06-20 13.34.11 vid 2x2 multi phase single plane\ref_seq.tif")
+        BOG.sequence_manager.reference_period = 3.577851226661945105e+01
+        BOG.run()
+        return BOG
 
 
 class SequenceManager():
     def __init__(self):
         self.frame_history = []
         self.period_history = []
+        self.reference_sequence = None
         self.reference_indices = None
         self.current_image_array = None
+        self.max_frames = None
+        self.total_frame_index = 0
 
         self.settings = {
             "buffer_length": 200,
             "padding_frames": 3,
-            "reference_framerate_reduction": 1
+            "reference_framerate_reduction": 1,
+            "include_reference_frames": True
         }
 
     def reset(self):
@@ -166,15 +195,31 @@ class SequenceManager():
         self.frame_index = 0
 
     def set_source(self, sequence_src):
+        print(f"Setting source to {sequence_src}")
         self.sequence_src = sequence_src
-        self.file_list = sorted(glob.glob(sequence_src))
+        if type(sequence_src) is list:
+            self.file_list = glob.glob(sequence_src[0])
+            for i in range(1, len(sequence_src)):
+                self.file_list.extend(glob.glob(sequence_src[i]))
+            print(self.file_list)
+            self.file_list = sorted(self.file_list)
+            print(self.file_list)
+        else:
+            self.file_list = sorted(glob.glob(sequence_src))
+        #self.file_list = sorted(glob.glob(sequence_src))
         self.file_index = 0
         self.frame_index = 0
 
     def get_next_frame(self):
+        if self.max_frames is not None and self.total_frame_index > self.max_frames:
+            self.current_image_array = None
+            self.current_frame = None
+            return None
+        
         if (self.current_image_array is None) and (self.file_index < len(self.file_list)):
             self.current_image_array = self.load_tif(self.file_list[self.file_index])
             self.frame_index = 0
+
         if self.file_index >= len(self.file_list):
             self.current_image_array = None
             self.current_frame = None
@@ -192,10 +237,11 @@ class SequenceManager():
                     self.current_image_array = self.load_tif(self.file_list[self.file_index])
             else:
                 self.frame_index += 1
+            self.total_frame_index += 1
             return self.current_frame
         
     def set_reference_sequence(self, data_src):
-        print(f"Setting reference sequence from {data_src}")
+        print(f"Loading reference sequence from {data_src}")
         self.reference_sequence = self.load_tif(data_src)
 
     def get_reference_sequence(self):
@@ -211,6 +257,10 @@ class SequenceManager():
         self.reference_sequence = np.array(refget[0])
         self.reference_period = refget[1]
         self.reference_indices = refget[2]
+
+        if self.settings["include_reference_frames"]:
+            self.frame_index = 0
+            self.file_index = 0
             
     def establish_period_from_frames(self, pixel_array):
         """ Attempt to establish a period from the frame history,
@@ -382,7 +432,8 @@ class SequenceManager():
 
         return diffs.size - interpolatedMatchEntry
             
-    def load_tif(self, data_src, frames = None):
+    @staticmethod
+    def load_tif(data_src, frames = None):
         """
         Load data file
         Adapted from open-optical-gating
@@ -514,6 +565,10 @@ def get_drift_estimate(frame, refs, matching_frame=None, dxRange=range(-30,31,3)
             candidateShifts[bestShiftPos][1])
         
 if __name__ == "__main__":
+    """
+    Code to test optical gating analysis
+    """
+
     print("Running optical_gating_analysis.py as main")
 
     BOG = BasicOpticalGating()
