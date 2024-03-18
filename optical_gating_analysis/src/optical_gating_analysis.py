@@ -20,6 +20,10 @@ import time
 import gc
 import glob
 import plistlib
+from scipy.optimize import curve_fit
+
+# Other
+from kalman_filter import KalmanFilter
 
 def v_fitting(y_1, y_2, y_3):
     # Fit using a symmetric 'V' function, to find the interpolated minimum for three datapoints y_1, y_2, y_3,
@@ -48,7 +52,8 @@ class BasicOpticalGating():
 
         self.settings = {
             "drift_correction": True,
-            "padding_frames": 2
+            "padding_frames": 2,
+            "normalise_sad": False
         }
 
     def get_sads(self):
@@ -115,6 +120,9 @@ class BasicOpticalGating():
 
         SAD = jps.sad_with_references(frame_cropped, reference_frames_cropped)
 
+        if self.settings["normalise_sad"]:
+            SAD = (SAD - np.min(SAD)) / (np.max(SAD) - np.min(SAD))
+
         if self.settings["drift_correction"]:
             dx, dy = self.drift
             self.drift = update_drift_estimate(frame, reference_sequence[np.argmin(SAD)], (dx, dy))
@@ -133,14 +141,9 @@ class BasicOpticalGating():
         
         # Get the frame estimates
         for i, sad in enumerate(self.sads):
-            frame_minima = np.argmin(sad[self.settings["padding_frames"]:-self.settings["padding_frames"]]) + self.settings["padding_frames"]
-
-            y_1 = sad[frame_minima - 1]
-            y_2 = sad[frame_minima]
-            y_3 = sad[frame_minima + 1]
-            subframe_minima = v_fitting(y_1, y_2, y_3)[0]
-            self.phases.append(2 * np.pi * ((frame_minima - self.settings["padding_frames"] + subframe_minima) / self.sequence_manager.reference_period))
-            self.frame_minimas.append(frame_minima)
+            phase = self.get_phase(sad)
+            self.phases.append(phase[0])
+            self.frame_minimas.append(phase[1])
 
         self.phases = np.array(self.phases)
         self.frame_minimas = np.array(self.frame_minimas)
@@ -152,6 +155,21 @@ class BasicOpticalGating():
 
         # Get unwrapped phases
         self.unwrapped_phases = np.unwrap(self.phases)
+        self.unwrapped_phases = self.unwrapped_phases - self.unwrapped_phases[0]
+
+    def get_phase(self, sad):
+        frame_minima = np.argmin(sad[self.settings["padding_frames"]:-self.settings["padding_frames"]]) + self.settings["padding_frames"]
+
+        y_1 = sad[frame_minima - 1]
+        y_2 = sad[frame_minima]
+        y_3 = sad[frame_minima + 1]
+        
+        subframe_minima = v_fitting(y_1, y_2, y_3)[0]
+        phase = 2 * np.pi * ((frame_minima - self.settings["padding_frames"] + subframe_minima) / self.sequence_manager.reference_period)
+        #phase = frame_minima - self.settings["padding_frames"] + subframe_minima
+
+        return phase, frame_minima
+
 
     def run(self):
         self.sequence_manager.reset()
@@ -181,11 +199,12 @@ class SequenceManager():
         self.reference_indices = None
         self.current_image_array = None
         self.max_frames = None
+        self.skip_frames = None
         self.total_frame_index = 0
 
         self.settings = {
             "buffer_length": 200,
-            "padding_frames": 3,
+            "padding_frames": 2,
             "reference_framerate_reduction": 1,
             "include_reference_frames": True
         }
@@ -206,9 +225,9 @@ class SequenceManager():
             print(self.file_list)
         else:
             self.file_list = sorted(glob.glob(sequence_src))
-        #self.file_list = sorted(glob.glob(sequence_src))
-        self.file_index = 0
-        self.frame_index = 0
+
+        self.reset_frame_loader()
+
 
     def get_next_frame(self):
         if self.max_frames is not None and self.total_frame_index > self.max_frames:
@@ -220,6 +239,20 @@ class SequenceManager():
             self.current_image_array = self.load_tif(self.file_list[self.file_index])
             self.frame_index = 0
 
+        if self.skip_frames is not None:
+            while self.total_frame_index < self.skip_frames:
+                self.frame_index += 1
+                self.total_frame_index += 1
+
+                """if self.skip_frames - self.total_frame_index < self.current_image_array.shape[0]:
+                    self.frame_index = self.skip_frames - self.total_frame_index
+                    self.total_frame_index += self.frame_index"""
+
+                if self.frame_index == self.current_image_array.shape[0]:
+                    self.current_image_array = self.load_tif(self.file_list[self.file_index])
+                    self.file_index += 1
+                    self.frame_index = 0
+                
         if self.file_index >= len(self.file_list):
             self.current_image_array = None
             self.current_frame = None
@@ -244,6 +277,19 @@ class SequenceManager():
         print(f"Loading reference sequence from {data_src}")
         self.reference_sequence = self.load_tif(data_src)
 
+    def set_reference_sequence_by_indices(self, indices):
+        frame_history = []
+
+        for i in range(0, indices[1]):
+            frame = self.get_next_frame()
+            if i >= indices[0]:
+                frame_history.append(frame)
+
+        self.reference_period = indices[1] - indices[0]
+        self.reference_sequence = np.array(frame_history)
+        self.reference_indices = indices
+        self.reset_frame_loader()
+
     def get_reference_sequence(self):
         print("Getting reference sequence")
 
@@ -259,8 +305,15 @@ class SequenceManager():
         self.reference_indices = refget[2]
 
         if self.settings["include_reference_frames"]:
-            self.frame_index = 0
-            self.file_index = 0
+            self.reset_frame_loader()
+
+        print(f"Reference period: {self.reference_period}; Reference indices: {self.reference_indices}")
+
+    def reset_frame_loader(self):
+        self.frame_index = 0
+        self.file_index = 0
+        self.total_frame_index = 0
+        self.current_image_array = None
             
     def establish_period_from_frames(self, pixel_array):
         """ Attempt to establish a period from the frame history,
@@ -476,11 +529,54 @@ class Predictor():
     """
     Takes a list of phases and returns a list of predicted phases
     """
-    def __init__(self, unwrapped_phases = None):
-        self.unwrapped_phases = unwrapped_phases
+    def __init__(self, prediction_method = None, unwrapped_phases = None):
+        self.unwrapped_phases = np.asarray(unwrapped_phases)
 
-    def predict(self, unwrapped_phases):
+        self.set_prediction_method(prediction_method)
+
+    def set_data(self, unwrapped_phases = None):
+        self.unwrapped_phases = np.asarray(unwrapped_phases)
         return None
+    
+    def set_prediction_method(self, prediction_method):
+        self.prediction_method = prediction_method
+        if self.prediction_method == "kalman":
+            self.initialise_kalman_filter()
+        elif self.prediction_method == "linear":
+            self.initialise_linear_predictor()
+        return None
+    
+    def initialise_linear_predictor(self):
+        self.prediction_points = 30
+        print("initialising linear predictor")
+        return None
+    
+    def initialise_kalman_filter(self):
+        self.kalman_filter = KalmanFilter.constant_velocity_2(1, 1, 0.1, np.array([0, 1]), np.array([[10, 0], [0, 10]]))
+        self.kalman_filter.data = self.unwrapped_phases
+    
+    def run_prediction(self):
+        self.xs = []
+
+        if self.prediction_method == "kalman":
+            self.kalman_filter.run()
+            return self.kalman_filter.xs
+        elif self.prediction_method == "linear":
+            # Get a moving forward prediction using a linear predictor
+            xs = []
+            for i in range(2,self.unwrapped_phases.shape[0]):
+                if i < self.prediction_points:
+                    x = np.arange(0, i)
+                    y = self.unwrapped_phases[0:i]
+                    fit =  np.polyfit(x, y, 1)
+                    self.xs.append(fit[0] * (i + 1) + fit[1])
+                else:
+                    x = np.arange(i - self.prediction_points, i)
+                    y = self.unwrapped_phases[i - self.prediction_points:i]
+                    fit =  np.polyfit(x, y, 1)
+                    self.xs.append(fit[0] * (i + 1) + fit[1])
+
+
 
 def update_drift_estimate(frame0, bestMatch0, drift0):
     """ Determine an updated estimate of the sample drift.
@@ -577,5 +673,15 @@ if __name__ == "__main__":
     BOG.sequence_manager.reference_period = 3.577851226661945105e+01
     BOG.run()
 
-    plt.plot(BOG.unwrapped_phases)
+    predictor = Predictor(unwrapped_phases = BOG.unwrapped_phases)
+    predictor.set_prediction_method("linear")
+    predictor.run_prediction()
+
+    plt.scatter(BOG.phases[3:-1], predictor.xs[0:-2] - BOG.unwrapped_phases[3:-1])
     plt.show()
+
+    plt.scatter(range(len(BOG.phases[3:-1])), np.asarray(predictor.xs[0:-2]) - (2 * np.pi / 35.25) * np.arange(3, BOG.phases.shape[0] - 1))
+    plt.show()
+
+    """plt.plot(BOG.unwrapped_phases)
+    plt.show()"""

@@ -23,6 +23,7 @@ class KalmanFilter():
         # Arrays to store results
         self.xs = []
         self.Ps = []
+        self.predictions = []
         
     def predict(self):
         # Predict our state using our model of the system
@@ -63,10 +64,14 @@ class KalmanFilter():
     def run(self):
         for i in range(self.data.shape[0]):
             self.predict()
+            self.predictions.append(self.x)
+            print(self.x)
             self.update(self.data[i])
             self.xs.append(self.x)
+            print(self.x)
             self.Ps.append(self.P)
 
+        self.predictions = np.asarray(self.predictions)
         self.xs = np.asarray(self.xs)
         self.Ps = np.asarray(self.Ps)
 
