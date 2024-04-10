@@ -44,17 +44,23 @@ def v_fitting(y_1, y_2, y_3):
 
 class BasicOpticalGating():
     def __init__(self):
+        self.settings = {
+            "drift_correction": True,
+            "padding_frames": 2,
+            "normalise_sad": False,
+            "pi_space": True,
+            "buffer_length": 600,
+            "reference_framerate_reduction": 1,
+            "include_reference_frames": True
+        }
+
         self.sequence_manager = SequenceManager()
+        self.sequence_manager.settings = self.settings
         self.predictor = Predictor()
 
         self.drift = (0, 0)
         self.drifts = [self.drift]
 
-        self.settings = {
-            "drift_correction": True,
-            "padding_frames": 2,
-            "normalise_sad": False
-        }
 
     def get_sads(self):
         print("Getting SADs")
@@ -149,12 +155,16 @@ class BasicOpticalGating():
         self.frame_minimas = np.array(self.frame_minimas)
 
         # Get delta phases
+        if self.settings["pi_space"]:
+            period = 2 * np.pi
+        else:
+            period = self.sequence_manager.reference_period
         self.delta_phases = np.diff(self.phases)
-        self.delta_phases[self.delta_phases < - np.pi] += 2 * np.pi
-        self.delta_phases[self.delta_phases > np.pi] -= 2 * np.pi
+        self.delta_phases[self.delta_phases < - period / 2] += period
+        self.delta_phases[self.delta_phases > period / 2] -= period
 
         # Get unwrapped phases
-        self.unwrapped_phases = np.unwrap(self.phases)
+        self.unwrapped_phases = np.unwrap(self.phases, period = period)
         self.unwrapped_phases = self.unwrapped_phases - self.unwrapped_phases[0]
 
     def get_phase(self, sad):
@@ -165,8 +175,10 @@ class BasicOpticalGating():
         y_3 = sad[frame_minima + 1]
         
         subframe_minima = v_fitting(y_1, y_2, y_3)[0]
-        phase = 2 * np.pi * ((frame_minima - self.settings["padding_frames"] + subframe_minima) / self.sequence_manager.reference_period)
-        #phase = frame_minima - self.settings["padding_frames"] + subframe_minima
+        if self.settings["pi_space"] == True:
+            phase = 2 * np.pi * ((frame_minima - self.settings["padding_frames"] + subframe_minima) / self.sequence_manager.reference_period)
+        else:
+            phase = frame_minima - self.settings["padding_frames"] + subframe_minima
 
         return phase, frame_minima
 
@@ -183,12 +195,11 @@ class BasicOpticalGating():
     # Run with some default data
     @classmethod
     def default(cls):
-        BOG = cls()
-        BOG.sequence_manager.set_source(r"D:\Data\2012-06-20 13.34.11 vid 2x2 multi phase single plane\brightfield\*tif")
-        BOG.sequence_manager.set_reference_sequence(r"D:\Data\2012-06-20 13.34.11 vid 2x2 multi phase single plane\ref_seq.tif")
-        BOG.sequence_manager.reference_period = 3.577851226661945105e+01
-        BOG.run()
-        return BOG
+        oog = cls()
+        oog.sequence_manager.set_source(r"D:\Data\2012-06-20 13.34.11 vid 2x2 multi phase single plane\brightfield\*tif")
+        oog.sequence_manager.set_reference_sequence(r"D:\Data\2012-06-20 13.34.11 vid 2x2 multi phase single plane\ref_seq.tif")
+        oog.sequence_manager.reference_period = 3.577851226661945105e+01
+        return oog
 
 
 class SequenceManager():
@@ -201,13 +212,6 @@ class SequenceManager():
         self.max_frames = None
         self.skip_frames = None
         self.total_frame_index = 0
-
-        self.settings = {
-            "buffer_length": 200,
-            "padding_frames": 2,
-            "reference_framerate_reduction": 1,
-            "include_reference_frames": True
-        }
 
     def reset(self):
         self.file_index = 0
@@ -243,10 +247,6 @@ class SequenceManager():
             while self.total_frame_index < self.skip_frames:
                 self.frame_index += 1
                 self.total_frame_index += 1
-
-                """if self.skip_frames - self.total_frame_index < self.current_image_array.shape[0]:
-                    self.frame_index = self.skip_frames - self.total_frame_index
-                    self.total_frame_index += self.frame_index"""
 
                 if self.frame_index == self.current_image_array.shape[0]:
                     self.current_image_array = self.load_tif(self.file_list[self.file_index])
@@ -525,59 +525,6 @@ class SequenceManager():
 
         return data
 
-class Predictor():
-    """
-    Takes a list of phases and returns a list of predicted phases
-    """
-    def __init__(self, prediction_method = None, unwrapped_phases = None):
-        self.unwrapped_phases = np.asarray(unwrapped_phases)
-
-        self.set_prediction_method(prediction_method)
-
-    def set_data(self, unwrapped_phases = None):
-        self.unwrapped_phases = np.asarray(unwrapped_phases)
-        return None
-    
-    def set_prediction_method(self, prediction_method):
-        self.prediction_method = prediction_method
-        if self.prediction_method == "kalman":
-            self.initialise_kalman_filter()
-        elif self.prediction_method == "linear":
-            self.initialise_linear_predictor()
-        return None
-    
-    def initialise_linear_predictor(self):
-        self.prediction_points = 30
-        print("initialising linear predictor")
-        return None
-    
-    def initialise_kalman_filter(self):
-        self.kalman_filter = KalmanFilter.constant_velocity_2(1, 1, 0.1, np.array([0, 1]), np.array([[10, 0], [0, 10]]))
-        self.kalman_filter.data = self.unwrapped_phases
-    
-    def run_prediction(self):
-        self.xs = []
-
-        if self.prediction_method == "kalman":
-            self.kalman_filter.run()
-            return self.kalman_filter.xs
-        elif self.prediction_method == "linear":
-            # Get a moving forward prediction using a linear predictor
-            xs = []
-            for i in range(2,self.unwrapped_phases.shape[0]):
-                if i < self.prediction_points:
-                    x = np.arange(0, i)
-                    y = self.unwrapped_phases[0:i]
-                    fit =  np.polyfit(x, y, 1)
-                    self.xs.append(fit[0] * (i + 1) + fit[1])
-                else:
-                    x = np.arange(i - self.prediction_points, i)
-                    y = self.unwrapped_phases[i - self.prediction_points:i]
-                    fit =  np.polyfit(x, y, 1)
-                    self.xs.append(fit[0] * (i + 1) + fit[1])
-
-
-
 def update_drift_estimate(frame0, bestMatch0, drift0):
     """ Determine an updated estimate of the sample drift.
         We try changing the drift value by ±1 in x and y.
@@ -659,6 +606,77 @@ def get_drift_estimate(frame, refs, matching_frame=None, dxRange=range(-30,31,3)
 
     return (candidateShifts[bestShiftPos][0],
             candidateShifts[bestShiftPos][1])
+
+class Predictor():
+    """
+    Takes a list of phases and returns a list of predicted phases
+    """
+    def __init__(self, prediction_method = None, unwrapped_phases = None):
+        self.unwrapped_phases = np.asarray(unwrapped_phases)
+
+        self.set_prediction_method(prediction_method)
+
+    def set_data(self, unwrapped_phases = None):
+        self.unwrapped_phases = np.asarray(unwrapped_phases)
+        return None
+    
+    def set_prediction_method(self, prediction_method):
+        self.prediction_method = prediction_method
+        if self.prediction_method == "kalman":
+            self.initialise_kalman_filter()
+        elif self.prediction_method == "linear":
+            self.initialise_linear_predictor()
+        return None
+    
+    def initialise_linear_predictor(self):
+        self.prediction_points = 30
+        print("initialising linear predictor")
+        return None
+    
+    def initialise_kalman_filter(self):
+        self.kalman_filter = KalmanFilter.constant_velocity_2(1, 1, 0.1, np.array([0, 1]), np.array([[10, 0], [0, 10]]))
+        self.kalman_filter.data = self.unwrapped_phases
+    
+    def run_prediction(self):
+        self.xs = []
+
+        if self.prediction_method == "kalman":
+            self.kalman_filter.run()
+            return self.kalman_filter.xs
+        elif self.prediction_method == "linear":
+            # Get a moving forward prediction using a linear predictor
+            xs = []
+            for i in range(2,self.unwrapped_phases.shape[0]):
+                if i < self.prediction_points:
+                    x = np.arange(0, i)
+                    y = self.unwrapped_phases[0:i]
+                    fit =  np.polyfit(x, y, 1)
+                    self.xs.append(fit[0] * (i + 1) + fit[1])
+                else:
+                    x = np.arange(i - self.prediction_points, i)
+                    y = self.unwrapped_phases[i - self.prediction_points:i]
+                    fit =  np.polyfit(x, y, 1)
+                    self.xs.append(fit[0] * (i + 1) + fit[1])
+
+class linear_predictor():
+    def __init__(self, xcoords, ycoords):
+        self.set_data(xcoords, ycoords)
+
+    def set_data(self, xcoords, ycoords):
+        self.xcoords = xcoords
+        self.ycoords = ycoords
+
+    def get_prediction(self, index, forward_prediction = 3):
+        x = np.arange(index[0], index[1])
+        fit = np.polyfit(x, self.ycoords[index[0]:index[1]], 1)
+        fitfunc = np.poly1d(fit)
+        return fitfunc(index[1] + forward_prediction)
+    
+    def get_predictions(self, prediction_points = 30, forward_prediction = 3):
+        predictions = []
+        for index in range(prediction_points, self.ycoords.shape[0] - forward_prediction - prediction_points):
+            predictions.append(self.get_prediction([index, index + prediction_points], forward_prediction))
+        return predictions
         
 if __name__ == "__main__":
     """
@@ -685,3 +703,24 @@ if __name__ == "__main__":
 
     """plt.plot(BOG.unwrapped_phases)
     plt.show()"""
+
+class analyser():
+    def __init__(self, oog):
+        self.oog = oog
+
+        self.flags = {
+            "sequence_loaded": False
+        }
+
+    def get_sequence(self):
+        self.sequence = SequenceManager.load_tif(self.oog.sequence_manager.sequence_src)
+        self.flags["sequence_loaded"] = True
+
+    def check_if_sequence_loaded(self):
+        if self.flags["sequence_loaded"] == False:
+            self.get_sequence()
+
+    def get_heartrate_from_delta_phases(self):
+        self.check_if_sequence_loaded()
+        self.heartrate = 1 / np.mean(self.oog.delta_phases)
+        return self.heartrate
