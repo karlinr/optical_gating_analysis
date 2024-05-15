@@ -49,9 +49,10 @@ class BasicOpticalGating():
             "padding_frames": 2,
             "normalise_sad": False,
             "pi_space": True,
-            "buffer_length": 600,
+            "buffer_length": 800,
             "reference_framerate_reduction": 1,
-            "include_reference_frames": True
+            "include_reference_frames": True,
+            "subframe_method": "v_fitting"
         }
 
         self.sequence_manager = SequenceManager()
@@ -126,6 +127,13 @@ class BasicOpticalGating():
 
         SAD = jps.sad_with_references(frame_cropped, reference_frames_cropped)
 
+        from scipy import signal
+        #sos = signal.butter(50, 40/100, output='sos', btype = "lowpass")
+        sos = signal.butter(10, [55,65], fs = 320, output='sos', btype = "bandstop")
+
+
+        #SAD = signal.sosfiltfilt(sos, SAD)
+
         if self.settings["normalise_sad"]:
             SAD = (SAD - np.min(SAD)) / (np.max(SAD) - np.min(SAD))
 
@@ -175,10 +183,21 @@ class BasicOpticalGating():
         y_3 = sad[frame_minima + 1]
         
         subframe_minima = v_fitting(y_1, y_2, y_3)[0]
+
+        
         if self.settings["pi_space"] == True:
             phase = 2 * np.pi * ((frame_minima - self.settings["padding_frames"] + subframe_minima) / self.sequence_manager.reference_period)
         else:
             phase = frame_minima - self.settings["padding_frames"] + subframe_minima
+
+        if self.settings["subframe_method"] == "parabola":
+            # fit a parabola using curve_fit to find minima
+            def u_fit(x, a, b, c):
+                return a * x**2 + b * x + c
+            
+            popt, pcov = curve_fit(u_fit, np.arange(frame_minima - 2, frame_minima + 3), sad[frame_minima - 2:frame_minima + 3], maxfev = 10000)
+            phase = - popt[1] / (2 * popt[0]) - self.settings["padding_frames"]
+
 
         return phase, frame_minima
 
@@ -188,7 +207,8 @@ class BasicOpticalGating():
         if self.sequence_manager.reference_sequence is None:
             self.sequence_manager.get_reference_sequence()
         drift_correct = 32
-        self.drift = get_drift_estimate(self.sequence_manager.get_next_frame(), self.sequence_manager.reference_sequence, dxRange=range(-drift_correct,drift_correct+1,3), dyRange=range(-drift_correct,drift_correct+1,3))
+        self.drift = get_drift_estimate(self.sequence_manager.get_next_frame(), self.sequence_manager.reference_sequence, dxRange=range(-drift_correct,drift_correct+1,1), dyRange=range(-drift_correct,drift_correct+1,1))
+        self.drifts = [self.drift]
         self.get_sads()
         self.get_phases()
 
@@ -201,6 +221,37 @@ class BasicOpticalGating():
         oog.sequence_manager.reference_period = 3.577851226661945105e+01
         return oog
 
+    def plot_summary(self):
+        frame_rate = self.sequence_manager.frame_rate
+
+        plt.figure(figsize = (16,16))
+        plt.subplot(221)
+        plt.title("Phases")
+        plt.plot(self.phases)
+        plt.xlabel("Frame number")
+        plt.ylabel("Phase (rad)")
+
+        plt.subplot(222)
+        plt.title("Phases against delta-phases")
+        plt.scatter(self.phases[1::],radsperframe_to_bps(self.delta_phases, frame_rate), s = 5)
+        plt.xlabel("Phase (rad)")
+        plt.ylabel("Beat velocity (beats/s)")
+
+        plt.subplot(223)
+        plt.title("Drifts")
+        plt.plot(np.array(self.drifts)[:,0], label = "x")
+        plt.plot(np.array(self.drifts)[:,1], label = "y")
+        plt.legend()
+        plt.xlabel("Frame number")
+        plt.ylabel("Drift (pixels)")
+
+        plt.subplot(224)
+        plt.title("Delta-phases against frame number")
+        plt.scatter(range(self.delta_phases.shape[0]), radsperframe_to_bps(self.delta_phases, frame_rate), s = 5)
+        plt.xlabel("Frame number")
+        plt.ylabel("Beat velocity (beats/s)")
+
+        plt.show()
 
 class SequenceManager():
     def __init__(self):
@@ -212,6 +263,8 @@ class SequenceManager():
         self.max_frames = None
         self.skip_frames = None
         self.total_frame_index = 0
+
+        self.frame_rate = 80
 
     def reset(self):
         self.file_index = 0
@@ -712,6 +765,10 @@ class analyser():
             "sequence_loaded": False
         }
 
+    def get_indices_of_beats(self, start_frame, height, distance, prominence):
+        # Get the SADs
+        pass
+
     def get_sequence(self):
         self.sequence = SequenceManager.load_tif(self.oog.sequence_manager.sequence_src)
         self.flags["sequence_loaded"] = True
@@ -724,3 +781,8 @@ class analyser():
         self.check_if_sequence_loaded()
         self.heartrate = 1 / np.mean(self.oog.delta_phases)
         return self.heartrate
+    
+
+
+def radsperframe_to_bps(radsperframe, framerate):
+    return (radsperframe * framerate) / (2 * np.pi)
