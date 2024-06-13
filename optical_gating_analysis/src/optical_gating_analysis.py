@@ -24,6 +24,7 @@ from scipy.optimize import curve_fit
 
 # Other
 from kalman_filter import KalmanFilter
+from tqdm import tqdm
 
 def v_fitting(y_1, y_2, y_3):
     # Fit using a symmetric 'V' function, to find the interpolated minimum for three datapoints y_1, y_2, y_3,
@@ -64,13 +65,13 @@ class BasicOpticalGating():
 
 
     def get_sads(self):
-        print("Getting SADs")
-
         self.sads = []
 
         self.frame_means = []
         self.ref_means = []
 
+        pbar = tqdm(total = len(self.sequence_manager.file_list), desc = "Getting SADs")
+        current_file_index = 0
         while True:
             frame = self.sequence_manager.get_next_frame()
             if frame is None:
@@ -78,6 +79,10 @@ class BasicOpticalGating():
             sad, frame_mean = self.get_sad(frame, self.sequence_manager.reference_sequence)
             self.sads.append(sad)
             self.frame_means.append(frame_mean)
+            if self.sequence_manager.file_index != current_file_index:
+                pbar.update(1)
+                current_file_index = self.sequence_manager.file_index
+        pbar.close()
 
     def get_sad(self, frame, reference_sequence):
         """ Get the sum of absolute differences for a single frame and our reference sequence.
@@ -127,9 +132,9 @@ class BasicOpticalGating():
 
         SAD = jps.sad_with_references(frame_cropped, reference_frames_cropped)
 
-        from scipy import signal
+        """from scipy import signal
         #sos = signal.butter(50, 40/100, output='sos', btype = "lowpass")
-        sos = signal.butter(10, [55,65], fs = 320, output='sos', btype = "bandstop")
+        sos = signal.butter(10, [55,65], fs = 320, output='sos', btype = "bandstop")"""
 
 
         #SAD = signal.sosfiltfilt(sos, SAD)
@@ -148,13 +153,12 @@ class BasicOpticalGating():
     
     def get_phases(self):
         """ Get the phase estimates for our sequence""" 
-        print("Getting phases")
 
         self.phases = []
         self.frame_minimas = []
         
         # Get the frame estimates
-        for i, sad in enumerate(self.sads):
+        for i, sad in enumerate(tqdm(self.sads, desc = "Getting phases")):
             phase = self.get_phase(sad)
             self.phases.append(phase[0])
             self.frame_minimas.append(phase[1])
@@ -162,18 +166,18 @@ class BasicOpticalGating():
         self.phases = np.array(self.phases)
         self.frame_minimas = np.array(self.frame_minimas)
 
-        # Get delta phases
+        # Set period
         if self.settings["pi_space"]:
             period = 2 * np.pi
         else:
             period = self.sequence_manager.reference_period
-        self.delta_phases = np.diff(self.phases)
-        self.delta_phases[self.delta_phases < - period / 2] += period
-        self.delta_phases[self.delta_phases > period / 2] -= period
 
         # Get unwrapped phases
         self.unwrapped_phases = np.unwrap(self.phases, period = period)
         self.unwrapped_phases = self.unwrapped_phases - self.unwrapped_phases[0]
+
+        # Get delta phases
+        self.delta_phases = np.diff(self.unwrapped_phases)
 
     def get_phase(self, sad):
         frame_minima = np.argmin(sad[self.settings["padding_frames"]:-self.settings["padding_frames"]]) + self.settings["padding_frames"]
@@ -186,7 +190,7 @@ class BasicOpticalGating():
 
         
         if self.settings["pi_space"] == True:
-            phase = 2 * np.pi * ((frame_minima - self.settings["padding_frames"] + subframe_minima) / self.sequence_manager.reference_period)
+            phase = (2 * np.pi * (frame_minima - self.settings["padding_frames"] + subframe_minima)) / self.sequence_manager.reference_period
         else:
             phase = frame_minima - self.settings["padding_frames"] + subframe_minima
 
@@ -782,7 +786,5 @@ class analyser():
         self.heartrate = 1 / np.mean(self.oog.delta_phases)
         return self.heartrate
     
-
-
 def radsperframe_to_bps(radsperframe, framerate):
     return (radsperframe * framerate) / (2 * np.pi)
