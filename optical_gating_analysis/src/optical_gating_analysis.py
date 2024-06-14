@@ -167,10 +167,7 @@ class BasicOpticalGating():
         self.frame_minimas = np.array(self.frame_minimas)
 
         # Set period
-        if self.settings["pi_space"]:
-            period = 2 * np.pi
-        else:
-            period = self.sequence_manager.reference_period
+        period = 2 * np.pi
 
         # Get unwrapped phases
         self.unwrapped_phases = np.unwrap(self.phases, period = period)
@@ -178,6 +175,10 @@ class BasicOpticalGating():
 
         # Get delta phases
         self.delta_phases = np.diff(self.unwrapped_phases)
+
+        self.unwrapped_phases_frames = self.sequence_manager.reference_period * self.unwrapped_phases / (2 * np.pi)
+        self.delta_phases_frames = self.sequence_manager.reference_period * self.delta_phases / (2 * np.pi)
+        self.phases_frames = self.sequence_manager.reference_period * self.phases / (2 * np.pi)
 
     def get_phase(self, sad):
         frame_minima = np.argmin(sad[self.settings["padding_frames"]:-self.settings["padding_frames"]]) + self.settings["padding_frames"]
@@ -188,11 +189,7 @@ class BasicOpticalGating():
         
         subframe_minima = v_fitting(y_1, y_2, y_3)[0]
 
-        
-        if self.settings["pi_space"] == True:
-            phase = (2 * np.pi * (frame_minima - self.settings["padding_frames"] + subframe_minima)) / self.sequence_manager.reference_period
-        else:
-            phase = frame_minima - self.settings["padding_frames"] + subframe_minima
+        phase = (2 * np.pi * (frame_minima - self.settings["padding_frames"] + subframe_minima)) / self.sequence_manager.reference_period
 
         if self.settings["subframe_method"] == "parabola":
             # fit a parabola using curve_fit to find minima
