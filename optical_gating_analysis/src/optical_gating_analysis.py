@@ -25,6 +25,8 @@ from scipy.optimize import curve_fit
 # Other
 from kalman_filter import KalmanFilter
 from tqdm import tqdm
+from loguru import logger
+import sys
 
 def v_fitting(y_1, y_2, y_3):
     # Fit using a symmetric 'V' function, to find the interpolated minimum for three datapoints y_1, y_2, y_3,
@@ -42,6 +44,19 @@ def v_fitting(y_1, y_2, y_3):
 
     return x, y
 
+class Colour:
+    """_summary_ : Colour class for pretty printing
+    """
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    GREEN = "\033[92m"
+    YELLOW = "\033[93m"
+    MAGENTA = "\033[95m"
+    PURPLE = "\033[95m"
+    RED = "\033[91m"
+    END = "\033[0m"
+    BOLD = "\033[1m"
+    UNDERLINE = "\033[4m"
 
 class BasicOpticalGating():
     def __init__(self):
@@ -50,10 +65,12 @@ class BasicOpticalGating():
             "padding_frames": 2,
             "normalise_sad": False,
             "pi_space": True,
-            "buffer_length": 800,
+            "buffer_length": 400,
             "reference_framerate_reduction": 1,
             "include_reference_frames": True,
-            "subframe_method": "v_fitting"
+            "subframe_method": "v_fitting",
+            "progress_bars": True,
+            "show_status": True
         }
 
         self.sequence_manager = SequenceManager()
@@ -70,7 +87,7 @@ class BasicOpticalGating():
         self.frame_means = []
         self.ref_means = []
 
-        pbar = tqdm(total = len(self.sequence_manager.file_list), desc = "Getting SADs")
+        pbar = tqdm(total = len(self.sequence_manager.file_list), desc = "Getting SADs", disable = not self.settings["progress_bars"])
         current_file_index = 0
         while True:
             frame = self.sequence_manager.get_next_frame()
@@ -153,29 +170,29 @@ class BasicOpticalGating():
     
     def get_phases(self):
         """ Get the phase estimates for our sequence""" 
+        if self.settings["show_status"]:
+            print("Getting phases")
 
+        # Setup lists
         self.phases = []
         self.frame_minimas = []
         
         # Get the frame estimates
-        for i, sad in enumerate(tqdm(self.sads, desc = "Getting phases")):
+        for i, sad in enumerate(self.sads):
             phase = self.get_phase(sad)
             self.phases.append(phase[0])
             self.frame_minimas.append(phase[1])
 
+        # Make into numpy arrays
         self.phases = np.array(self.phases)
         self.frame_minimas = np.array(self.frame_minimas)
 
-        # Set period
-        period = 2 * np.pi
-
-        # Get unwrapped phases
-        self.unwrapped_phases = np.unwrap(self.phases, period = period)
-        self.unwrapped_phases = self.unwrapped_phases - self.unwrapped_phases[0]
-
-        # Get delta phases
+        # Get unwrapped phases, phases, and delta phases in phase space
+        self.unwrapped_phases = np.unwrap(self.phases, period = 2 * np.pi)
+        self.unwrapped_phases = self.unwrapped_phases# - self.unwrapped_phases[0]
         self.delta_phases = np.diff(self.unwrapped_phases)
 
+        # Get unwrapped phases, phases, and delta phases in frames space
         self.unwrapped_phases_frames = self.sequence_manager.reference_period * self.unwrapped_phases / (2 * np.pi)
         self.delta_phases_frames = self.sequence_manager.reference_period * self.delta_phases / (2 * np.pi)
         self.phases_frames = self.sequence_manager.reference_period * self.phases / (2 * np.pi)
@@ -189,25 +206,19 @@ class BasicOpticalGating():
         
         subframe_minima = v_fitting(y_1, y_2, y_3)[0]
 
-        phase = (2 * np.pi * (frame_minima - self.settings["padding_frames"] + subframe_minima)) / self.sequence_manager.reference_period
-
-        if self.settings["subframe_method"] == "parabola":
-            # fit a parabola using curve_fit to find minima
-            def u_fit(x, a, b, c):
-                return a * x**2 + b * x + c
-            
-            popt, pcov = curve_fit(u_fit, np.arange(frame_minima - 2, frame_minima + 3), sad[frame_minima - 2:frame_minima + 3], maxfev = 10000)
-            phase = - popt[1] / (2 * popt[0]) - self.settings["padding_frames"]
-
+        # We add 0.5 to ensure phase values are between 0 and 2*pi
+        # Doesn't really matter for prediction but makes the data more interpretable
+        phase = (2 * np.pi * (frame_minima - self.settings["padding_frames"] + subframe_minima)) / (self.sequence_manager.reference_period)
 
         return phase, frame_minima
 
 
     def run(self):
         self.sequence_manager.reset()
+        self.sequence_manager.settings = self.settings
         if self.sequence_manager.reference_sequence is None:
             self.sequence_manager.get_reference_sequence()
-        drift_correct = 32
+        drift_correct = 8
         self.drift = get_drift_estimate(self.sequence_manager.get_next_frame(), self.sequence_manager.reference_sequence, dxRange=range(-drift_correct,drift_correct+1,1), dyRange=range(-drift_correct,drift_correct+1,1))
         self.drifts = [self.drift]
         self.get_sads()
@@ -272,7 +283,8 @@ class SequenceManager():
         self.frame_index = 0
 
     def set_source(self, sequence_src):
-        print(f"Setting source to {sequence_src}")
+        if self.settings["show_status"]:
+            print(f"Setting source to {Colour.CYAN}{sequence_src}{Colour.END}")
         self.sequence_src = sequence_src
         if type(sequence_src) is list:
             self.file_list = glob.glob(sequence_src[0])
@@ -328,7 +340,8 @@ class SequenceManager():
             return self.current_frame
         
     def set_reference_sequence(self, data_src):
-        print(f"Loading reference sequence from {data_src}")
+        if self.settings["show_status"]:
+            print(f"Loading reference sequence from {Colour.CYAN}{data_src}{Colour.END}")
         self.reference_sequence = self.load_tif(data_src)
 
     def set_reference_sequence_by_indices(self, indices):
@@ -345,7 +358,8 @@ class SequenceManager():
         self.reset_frame_loader()
 
     def get_reference_sequence(self):
-        print("Getting reference sequence")
+        if self.settings["show_status"]:
+            print("Getting reference sequence", end = " ")
 
         i = 0
         while True:
@@ -361,7 +375,10 @@ class SequenceManager():
         if self.settings["include_reference_frames"]:
             self.reset_frame_loader()
 
-        print(f"Reference period: {self.reference_period}; Reference indices: {self.reference_indices}")
+        self.frame_history = []
+
+        if self.settings["show_status"]:
+            print(f"Reference period: {Colour.CYAN}{self.reference_period}{Colour.END}; Reference indices: {Colour.CYAN}{self.reference_indices}{Colour.END}")
 
     def reset_frame_loader(self):
         self.frame_index = 0
