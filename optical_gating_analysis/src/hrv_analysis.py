@@ -141,3 +141,55 @@ def get_hr_from_sad(sad_curve, height = 0.5, distance = 10, prominence = 0.05, p
     hrs = np.diff(minima_locs)
 
     return hrs + 1
+
+def get_hr_from_folder(source_folder, height = 0.5, distance = 10, prominence = 0.05, plot_sad = True):
+    import glob
+    import optical_gating_analysis as OG
+    import j_py_sad_correlation as jps
+
+
+    files = glob.glob(source_folder)
+
+    oog = OG.BasicOpticalGating()
+    oog.sequence_manager.set_source(files[0])
+    oog.run()
+
+    hrs = []
+    for sequence_src in tqdm(files):
+        data = OG.SequenceManager.load_tif(sequence_src)
+        def get_hr_from_sad(sad_curve, height = 0.5, distance = 10, prominence = 0.05, plot_sad = True):
+
+            frames_of_interest, _ = find_peaks(sad_curve, height = height, prominence = prominence, distance = distance)
+
+            print(frames_of_interest)
+
+            heartrates = []
+            for frame in frames_of_interest:
+                # Get diffs array
+                diffs = -jps.sad_with_references(data[frame], data)
+                diffs -= np.min(diffs)
+                diffs /= np.max(diffs)
+                
+                peaks, _ = find_peaks(diffs[frame - 5:frame+200], height = height, prominence = prominence, distance = distance)
+                peaks += frame - 5
+                # Get next peak
+                for peak in peaks:
+                    if peak > frame:
+                        diff = diffs[peak - 1:peak + 2]
+                        heartrate = (peak + OG.v_fitting(-diff[0], -diff[1], -diff[2])[0] + 1) - frame
+                        heartrates.append(heartrate)
+                        break;
+
+            return peaks[0:-1], heartrates
+
+            
+
+        diffs = -jps.sad_with_references(oog.sequence_manager.reference_sequence[2], data)[0::]
+        diffs -= np.min(diffs)
+        diffs /= np.max(diffs)
+
+        frame_number, hr = get_hr_from_sad(diffs, height = 0.2, distance = 10, prominence = 0.05, plot_sad = True)
+        hrs.extend(hr)
+
+    print(hrs)
+    return hrs
